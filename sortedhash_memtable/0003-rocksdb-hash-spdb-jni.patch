@@ -1,0 +1,177 @@
+From 9e278693fc813651cd830647b1d14b7b55d1ed93 Mon Sep 17 00:00:00 2001
+From: zhaoyue <zhaoyue130@huawei.com>
+Date: Tue, 16 Jun 2026 11:14:50 +0800
+Subject: [PATCH] =?UTF-8?q?[rocksdb-v6.26.1]=20=E6=B7=BB=E5=8A=A0=20HashSp?=
+ =?UTF-8?q?dbMemTableConfig=20Java/JNI=20=E6=94=AF=E6=8C=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 新增 HashSpdbMemTableConfig.java: Java API 封装
+- memtablejni.cc: 添加 NewHashSpdbRepFactory 的 JNI 桥接
+- java/CMakeLists.txt: 注册新类到构建
+- db/db_memtable_test.cc: GetIterator 签名适配
+- test_util/testutil.cc: GetIterator 签名适配
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ db/db_memtable_test.cc                        |  3 +-
+ java/CMakeLists.txt                           |  2 +
+ java/rocksjni/memtablejni.cc                  | 18 ++++++
+ .../org/rocksdb/HashSpdbMemTableConfig.java   | 59 +++++++++++++++++++
+ test_util/testutil.cc                         |  3 +-
+ 5 files changed, 83 insertions(+), 2 deletions(-)
+ create mode 100644 java/src/main/java/org/rocksdb/HashSpdbMemTableConfig.java
+
+diff --git a/db/db_memtable_test.cc b/db/db_memtable_test.cc
+index 62b50b60a..2d524ab03 100644
+--- a/db/db_memtable_test.cc
++++ b/db/db_memtable_test.cc
+@@ -50,7 +50,8 @@ class MockMemTableRep : public MemTableRep {
+     return rep_->ApproximateMemoryUsage();
+   }
+ 
+-  Iterator* GetIterator(Arena* arena) override {
++  Iterator* GetIterator(Arena* arena,
++                       bool /*part_of_flush*/ = false) override {
+     return rep_->GetIterator(arena);
+   }
+ 
+diff --git a/java/CMakeLists.txt b/java/CMakeLists.txt
+index f21c51b56..2b3d8b757 100644
+--- a/java/CMakeLists.txt
++++ b/java/CMakeLists.txt
+@@ -156,6 +156,7 @@ set(JAVA_MAIN_CLASSES
+   src/main/java/org/rocksdb/FlushOptions.java
+   src/main/java/org/rocksdb/HashLinkedListMemTableConfig.java
+   src/main/java/org/rocksdb/HashSkipListMemTableConfig.java
++  src/main/java/org/rocksdb/HashSpdbMemTableConfig.java
+   src/main/java/org/rocksdb/HdfsEnv.java
+   src/main/java/org/rocksdb/HistogramData.java
+   src/main/java/org/rocksdb/HistogramType.java
+@@ -450,6 +451,7 @@ if(${CMAKE_VERSION} VERSION_LESS "3.11.4" OR (${Java_VERSION_MINOR} STREQUAL "7"
+           org.rocksdb.FlushOptions
+           org.rocksdb.HashLinkedListMemTableConfig
+           org.rocksdb.HashSkipListMemTableConfig
++          org.rocksdb.HashSpdbMemTableConfig
+           org.rocksdb.HdfsEnv
+           org.rocksdb.IngestExternalFileOptions
+           org.rocksdb.Logger
+diff --git a/java/rocksjni/memtablejni.cc b/java/rocksjni/memtablejni.cc
+index 1188c5e59..691ad6e6d 100644
+--- a/java/rocksjni/memtablejni.cc
++++ b/java/rocksjni/memtablejni.cc
+@@ -7,6 +7,7 @@
+ 
+ #include "include/org_rocksdb_HashLinkedListMemTableConfig.h"
+ #include "include/org_rocksdb_HashSkipListMemTableConfig.h"
++#include "include/org_rocksdb_HashSpdbMemTableConfig.h"
+ #include "include/org_rocksdb_SkipListMemTableConfig.h"
+ #include "include/org_rocksdb_VectorMemTableConfig.h"
+ #include "rocksdb/memtablerep.h"
+@@ -31,6 +32,23 @@ jlong Java_org_rocksdb_HashSkipListMemTableConfig_newMemTableFactoryHandle(
+   return 0;
+ }
+ 
++/*
++ * Class:     org_rocksdb_HashSpdbMemTableConfig
++ * Method:    newMemTableFactoryHandle
++ * Signature: (J)J
++ */
++jlong Java_org_rocksdb_HashSpdbMemTableConfig_newMemTableFactoryHandle(
++    JNIEnv* env, jobject /*jobj*/, jlong jbucket_count) {
++  ROCKSDB_NAMESPACE::Status s =
++      ROCKSDB_NAMESPACE::JniUtil::check_if_jlong_fits_size_t(jbucket_count);
++  if (s.ok()) {
++    return reinterpret_cast<jlong>(ROCKSDB_NAMESPACE::NewHashSpdbRepFactory(
++        static_cast<size_t>(jbucket_count)));
++  }
++  ROCKSDB_NAMESPACE::IllegalArgumentExceptionJni::ThrowNew(env, s);
++  return 0;
++}
++
+ /*
+  * Class:     org_rocksdb_HashLinkedListMemTableConfig
+  * Method:    newMemTableFactoryHandle
+diff --git a/java/src/main/java/org/rocksdb/HashSpdbMemTableConfig.java b/java/src/main/java/org/rocksdb/HashSpdbMemTableConfig.java
+new file mode 100644
+index 000000000..da4a30364
+--- /dev/null
++++ b/java/src/main/java/org/rocksdb/HashSpdbMemTableConfig.java
+@@ -0,0 +1,59 @@
++// Copyright (C) 2023 Speedb Ltd. All rights reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//   http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
++package org.rocksdb;
++
++/**
++ * The config for hash spdbd memtable representation.
++ */
++public class HashSpdbMemTableConfig extends MemTableConfig {
++  public static final int DEFAULT_BUCKET_COUNT = 1000000;
++
++  /**
++   * HashSpdbMemTableConfig constructor
++   */
++  public HashSpdbMemTableConfig() {
++    bucketCount_ = DEFAULT_BUCKET_COUNT;
++  }
++
++  /**
++   * Set the number of hash buckets used in the hash spdb memtable.
++   * Default = 1000000.
++   *
++   * @param count the number of hash buckets used in the hash
++   *    spdb memtable.
++   * @return the reference to the current HashSpdbMemTableConfig.
++   */
++  public HashSpdbMemTableConfig setBucketCount(final long count) {
++    bucketCount_ = count;
++    return this;
++  }
++
++  /**
++   * @return the number of hash buckets
++   */
++  public long bucketCount() {
++    return bucketCount_;
++  }
++
++  @Override
++  protected long newMemTableFactoryHandle() {
++    return newMemTableFactoryHandle(bucketCount_);
++  }
++
++  private native long newMemTableFactoryHandle(long bucketCount) throws IllegalArgumentException;
++
++  private long bucketCount_;
++}
+diff --git a/test_util/testutil.cc b/test_util/testutil.cc
+index 9c72972ee..c862b318e 100644
+--- a/test_util/testutil.cc
++++ b/test_util/testutil.cc
+@@ -653,7 +653,8 @@ class SpecialMemTableRep : public MemTableRep {
+     return memtable_->ApproximateNumEntries(start_ikey, end_ikey);
+   }
+ 
+-  virtual MemTableRep::Iterator* GetIterator(Arena* arena = nullptr) override {
++  virtual MemTableRep::Iterator* GetIterator(Arena* arena = nullptr,
++                                            bool /*part_of_flush*/ = false) override {
+     return memtable_->GetIterator(arena);
+   }
+ 
+-- 
+2.43.0
+

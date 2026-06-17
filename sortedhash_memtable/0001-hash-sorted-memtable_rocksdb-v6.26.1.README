@@ -1,0 +1,84 @@
+# 0001-hash-sorted-memtable — 适配补丁说明
+
+## 基本信息
+
+| 项目 | 值 |
+|------|-----|
+| 源补丁 | `0001-hash-sorted-memtable.patch` |
+| 源版本 | Speedb (基于 RocksDB 8.6.7) |
+| 目标版本 | RocksDB v6.26.1 |
+| 适配补丁 | `0001-hash-sorted-memtable_rocksdb-v6.26.1.patch` |
+| 编译结果 | ✅ 通过 (librocksdb.a) |
+
+## 应用方法
+
+```bash
+cd rocksdb
+git apply --check 0001-hash-sorted-memtable_rocksdb-v6.26.1.patch
+git apply 0001-hash-sorted-memtable_rocksdb-v6.26.1.patch
+# 或使用 git am
+git am 0001-hash-sorted-memtable_rocksdb-v6.26.1.patch
+```
+
+## 依赖链
+
+无前置依赖，这是独立补丁。
+
+## 适配修改摘要
+
+### 新增文件 (2)
+- `memtable/spdb_sorted_vector.h` — 排序向量容器与迭代器
+- `memtable/hash_spdb_rep.cc` — Hash 排序 MemTable 主实现
+
+### 修改文件 (9)
+
+| 文件 | 修改内容 | 适配说明 |
+|------|---------|---------|
+| `include/rocksdb/memtablerep.h` | +28/-1 | 添加 PreCreateMemTableRep、PostCreateMemTableRep、IsRefreshIterSupported 虚方法；添加 Iterator::IsEmpty()；添加 NewHashSpdbRepFactory 声明；GetIterator 签名增加 part_of_flush 参数 |
+| `CMakeLists.txt` | +1 | 添加 memtable/hash_spdb_rep.cc 编译项 |
+| `src.mk` | +1 | 添加 memtable/hash_spdb_rep.cc 编译项 |
+| `table/plain/plain_table_factory.cc` | +14 | 使用 library.Register(AsRegex(...)) 注册 hash_spdb 配置字符串 |
+| `memtable/stl_wrappers.h` | +3 | 添加 Compare::operator()(const char*, const Slice&) 重载 |
+| `memtable/skiplistrep.cc` | +1/-1 | GetIterator 签名适配 |
+| `memtable/vectorrep.cc` | +2/-2 | GetIterator 签名适配 |
+| `memtable/hash_linklist_rep.cc` | +2/-2 | GetIterator 签名适配 |
+| `memtable/hash_skiplist_rep.cc` | +2/-2 | GetIterator 签名适配 |
+
+### 关键 API 适配
+
+1. **RWMutexWr → RWMutex**: 目标版本无写优先读写锁，使用标准 RWMutex 替代
+2. **基类扩展**: PreCreateMemTableRep/PostCreateMemTableRep/IsRefreshIterSupported 在目标版本基类中不存在，已添加默认实现
+3. **GetIterator 签名**: 基类单参数版本扩展为双参数版本（part_of_flush），所有子类已同步更新
+4. **ArenaTracker**: 目标版本无此功能，相关引用已去除
+5. **配置注册**: 目标版本使用 ObjectRegistry 的 library.Register(AsRegex(...)) 模式注册配置字符串
+6. **std::atomic 初始化**: 使用 brace init 替代 '= nullptr' 避免 deleted copy constructor
+7. **stl_wrappers::Compare**: 添加接受 Slice 的重载版本
+
+### 移除的功能（相比 Speedb 原版）
+
+- **ArenaTracker 内存追踪**: 目标版本无 MEMORY_REPORTING 功能，ArenaStats 枚举和调用已去除
+- **RWMutexWr 写优先锁**: 降级为 RWMutex（pthread_rwlock），在高并发读场景下可能有写饥饿
+- **后台 switch memtable 线程**: PreCreateMemTableRep/PostCreateMemTableRep 的异步机制已声明但默认返回 nullptr
+
+## 使用示例
+
+```cpp
+// 程序化创建
+rocksdb::Options options;
+options.memtable_factory.reset(rocksdb::NewHashSpdbRepFactory(400000, true));
+
+// 配置字符串方式
+options.memtable_factory = rocksdb::MemTableRepFactory::CreateFromString(
+    config_options, "hash_spdb:400000");
+```
+
+## 验证方法
+
+```bash
+# 编译验证
+make static_lib -j$(nproc)
+
+# 基准测试
+make db_bench -j$(nproc)
+./db_bench --benchmarks=fillrandom,readrandom --memtablerep=hash_spdb --num=100000
+```

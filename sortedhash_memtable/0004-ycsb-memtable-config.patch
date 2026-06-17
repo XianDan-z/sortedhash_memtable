@@ -1,0 +1,122 @@
+From d5139ca767dc7be7a78d27e59c0e045f9d8382c8 Mon Sep 17 00:00:00 2001
+From: FlowDB Benchmark <benchmark@example.com>
+Date: Tue, 16 Jun 2026 11:14:53 +0800
+Subject: [PATCH] =?UTF-8?q?[ycsb-0.18.0]=20=E6=B7=BB=E5=8A=A0=20HdrHistogr?=
+ =?UTF-8?q?am=20=E4=BE=9D=E8=B5=96=E5=92=8C=20memtable=20=E5=8F=AF?=
+ =?UTF-8?q?=E9=85=8D=E7=BD=AE=E6=94=AF=E6=8C=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+修改内容:
+- pom.xml: 添加 htrace-core4 运行时依赖
+- RocksDBClient.java:
+  - 新增 rocksdb.memtable 属性支持 (skip_list/hash_spdb/prefix_hash/hash_linkedlist/vector)
+  - 新增 rocksdb.memtable.buckets 属性控制哈希桶数量
+  - 新增 getMemTableConfig() 方法根据属性创建对应 MemTableConfig
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ rocksdb/pom.xml                               |  6 +++
+ .../site/ycsb/db/rocksdb/RocksDBClient.java   | 40 +++++++++++++++++++
+ 2 files changed, 46 insertions(+)
+
+diff --git a/rocksdb/pom.xml b/rocksdb/pom.xml
+index c1d34ccb..a030ef78 100644
+--- a/rocksdb/pom.xml
++++ b/rocksdb/pom.xml
+@@ -57,6 +57,12 @@ LICENSE file.
+       <version>1.7.25</version>
+       <scope>runtime</scope>
+     </dependency>
++    <dependency>
++      <groupId>org.apache.htrace</groupId>
++      <artifactId>htrace-core4</artifactId>
++      <version>4.1.0-incubating</version>
++      <scope>runtime</scope>
++    </dependency>
+     <dependency>
+       <groupId>junit</groupId>
+       <artifactId>junit</artifactId>
+diff --git a/rocksdb/src/main/java/site/ycsb/db/rocksdb/RocksDBClient.java b/rocksdb/src/main/java/site/ycsb/db/rocksdb/RocksDBClient.java
+index 51d9067b..a3ac5f23 100644
+--- a/rocksdb/src/main/java/site/ycsb/db/rocksdb/RocksDBClient.java
++++ b/rocksdb/src/main/java/site/ycsb/db/rocksdb/RocksDBClient.java
+@@ -44,6 +44,8 @@ public class RocksDBClient extends DB {
+ 
+   static final String PROPERTY_ROCKSDB_DIR = "rocksdb.dir";
+   static final String PROPERTY_ROCKSDB_OPTIONS_FILE = "rocksdb.optionsfile";
++  static final String PROPERTY_ROCKSDB_MEMTABLE = "rocksdb.memtable";
++  static final String PROPERTY_ROCKSDB_MEMTABLE_BUCKETS = "rocksdb.memtable.buckets";
+   private static final String COLUMN_FAMILY_NAMES_FILENAME = "CF_NAMES";
+ 
+   private static final Logger LOGGER = LoggerFactory.getLogger(RocksDBClient.class);
+@@ -146,6 +148,7 @@ public class RocksDBClient extends DB {
+     }
+ 
+     final int rocksThreads = Runtime.getRuntime().availableProcessors() * 2;
++    final MemTableConfig memTableConfig = getMemTableConfig();
+ 
+     if(cfDescriptors.isEmpty()) {
+       final Options options = new Options()
+@@ -155,6 +158,9 @@ public class RocksDBClient extends DB {
+           .setIncreaseParallelism(rocksThreads)
+           .setMaxBackgroundCompactions(rocksThreads)
+           .setInfoLogLevel(InfoLogLevel.INFO_LEVEL);
++      if (memTableConfig != null) {
++        options.setMemTableConfig(memTableConfig);
++      }
+       dbOptions = options;
+       return RocksDB.open(options, rocksDbDir.toAbsolutePath().toString());
+     } else {
+@@ -166,6 +172,12 @@ public class RocksDBClient extends DB {
+           .setInfoLogLevel(InfoLogLevel.INFO_LEVEL);
+       dbOptions = options;
+ 
++      if (memTableConfig != null) {
++        for (ColumnFamilyOptions cfo : cfOptionss) {
++          cfo.setMemTableConfig(memTableConfig);
++        }
++      }
++
+       final List<ColumnFamilyHandle> cfHandles = new ArrayList<>();
+       final RocksDB db = RocksDB.open(options, rocksDbDir.toAbsolutePath().toString(), cfDescriptors, cfHandles);
+       for(int i = 0; i < cfNames.size(); i++) {
+@@ -175,6 +187,34 @@ public class RocksDBClient extends DB {
+     }
+   }
+ 
++  private MemTableConfig getMemTableConfig() {
++    String memtableType = getProperties().getProperty(PROPERTY_ROCKSDB_MEMTABLE, "skip_list");
++    long buckets = Long.parseLong(
++        getProperties().getProperty(PROPERTY_ROCKSDB_MEMTABLE_BUCKETS, "400000"));
++
++    LOGGER.info("RocksDB memtable: " + memtableType + ", buckets: " + buckets);
++
++    switch (memtableType.toLowerCase()) {
++      case "skip_list":
++        return new SkipListMemTableConfig();
++      case "hash_spdb":
++        return new HashSpdbMemTableConfig().setBucketCount(buckets);
++      case "prefix_hash":
++        return new HashSkipListMemTableConfig()
++            .setBucketCount(buckets)
++            .setHeight(4)
++            .setBranchingFactor(4);
++      case "hash_linkedlist":
++        return new HashLinkedListMemTableConfig()
++            .setBucketCount(buckets);
++      case "vector":
++        return new VectorMemTableConfig();
++      default:
++        LOGGER.warn("Unknown memtable type: " + memtableType + ", using skip_list");
++        return new SkipListMemTableConfig();
++    }
++  }
++
+   @Override
+   public void cleanup() throws DBException {
+     super.cleanup();
+-- 
+2.43.0
+
