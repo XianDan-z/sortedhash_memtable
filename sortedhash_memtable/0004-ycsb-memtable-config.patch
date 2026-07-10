@@ -1,8 +1,8 @@
 From d5139ca767dc7be7a78d27e59c0e045f9d8382c8 Mon Sep 17 00:00:00 2001
 From: FlowDB Benchmark <benchmark@example.com>
 Date: Tue, 16 Jun 2026 11:14:53 +0800
-Subject: [PATCH] =?UTF-8?q?[ycsb-0.18.0]=20=E6=B7=BB=E5=8A=A0=20HdrHistogr?=
- =?UTF-8?q?am=20=E4=BE=9D=E8=B5=96=E5=92=8C=20memtable=20=E5=8F=AF?=
+Subject: [PATCH 1/3] =?UTF-8?q?[ycsb-0.18.0]=20=E6=B7=BB=E5=8A=A0=20HdrHis?=
+ =?UTF-8?q?togram=20=E4=BE=9D=E8=B5=96=E5=92=8C=20memtable=20=E5=8F=AF?=
  =?UTF-8?q?=E9=85=8D=E7=BD=AE=E6=94=AF=E6=8C=81?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -111,6 +111,142 @@ index 51d9067b..a3ac5f23 100644
 +      default:
 +        LOGGER.warn("Unknown memtable type: " + memtableType + ", using skip_list");
 +        return new SkipListMemTableConfig();
++    }
++  }
++
+   @Override
+   public void cleanup() throws DBException {
+     super.cleanup();
+-- 
+2.43.0
+
+
+From 5050b9dbdbbc60daabe76b1ff28ad65c65346660 Mon Sep 17 00:00:00 2001
+From: FlowDB Benchmark <benchmark@example.com>
+Date: Wed, 1 Jul 2026 16:32:56 +0800
+Subject: [PATCH 2/3] =?UTF-8?q?[ycsb-0.18.0]=20initRocksDBWithOptionsFile?=
+ =?UTF-8?q?=20=E8=B7=AF=E5=BE=84=E4=B9=9F=E6=94=AF=E6=8C=81=20rocksdb.memt?=
+ =?UTF-8?q?able=20=E5=8F=82=E6=95=B0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+允许通过 -p rocksdb.memtable=hash_spdb 在指定 optionsfile 时仍然
+覆盖 memtable 类型，与 initRocksDB 路径行为一致。
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ .../src/main/java/site/ycsb/db/rocksdb/RocksDBClient.java  | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/rocksdb/src/main/java/site/ycsb/db/rocksdb/RocksDBClient.java b/rocksdb/src/main/java/site/ycsb/db/rocksdb/RocksDBClient.java
+index a3ac5f23..4966087e 100644
+--- a/rocksdb/src/main/java/site/ycsb/db/rocksdb/RocksDBClient.java
++++ b/rocksdb/src/main/java/site/ycsb/db/rocksdb/RocksDBClient.java
+@@ -107,6 +107,13 @@ public class RocksDBClient extends DB {
+     OptionsUtil.loadOptionsFromFile(optionsFile.toAbsolutePath().toString(), Env.getDefault(), options, cfDescriptors);
+     dbOptions = options;
+ 
++    final MemTableConfig memTableConfig = getMemTableConfig();
++    if (memTableConfig != null) {
++      for (final ColumnFamilyDescriptor cfd : cfDescriptors) {
++        cfd.getOptions().setMemTableConfig(memTableConfig);
++      }
++    }
++
+     final RocksDB db = RocksDB.open(options, rocksDbDir.toAbsolutePath().toString(), cfDescriptors, cfHandles);
+ 
+     for(int i = 0; i < cfDescriptors.size(); i++) {
+-- 
+2.43.0
+
+
+From 987ed08e82ea84b4ecf1cbd0282213bb16ee6959 Mon Sep 17 00:00:00 2001
+From: FlowDB Benchmark <benchmark@example.com>
+Date: Fri, 10 Jul 2026 09:51:44 +0800
+Subject: [PATCH 3/3] =?UTF-8?q?[ycsb-0.18.0]=20=E6=B7=BB=E5=8A=A0=20isConc?=
+ =?UTF-8?q?urrentWriteSupported()=20=E6=94=AF=E6=8C=81=E4=B8=8D=E6=94=AF?=
+ =?UTF-8?q?=E6=8C=81=E5=B9=B6=E5=8F=91=E7=9A=84=20memtable?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+prefix_hash, hash_linkedlist, vector 三种 memtable 不支持并发写入，
+需自动设置 allow_concurrent_memtable_write=false。
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ .../site/ycsb/db/rocksdb/RocksDBClient.java   | 28 +++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/rocksdb/src/main/java/site/ycsb/db/rocksdb/RocksDBClient.java b/rocksdb/src/main/java/site/ycsb/db/rocksdb/RocksDBClient.java
+index 4966087e..dac3adbe 100644
+--- a/rocksdb/src/main/java/site/ycsb/db/rocksdb/RocksDBClient.java
++++ b/rocksdb/src/main/java/site/ycsb/db/rocksdb/RocksDBClient.java
+@@ -46,6 +46,7 @@ public class RocksDBClient extends DB {
+   static final String PROPERTY_ROCKSDB_OPTIONS_FILE = "rocksdb.optionsfile";
+   static final String PROPERTY_ROCKSDB_MEMTABLE = "rocksdb.memtable";
+   static final String PROPERTY_ROCKSDB_MEMTABLE_BUCKETS = "rocksdb.memtable.buckets";
++  static final String PROPERTY_ROCKSDB_CONCURRENT_WRITE = "rocksdb.concurrent_write";
+   private static final String COLUMN_FAMILY_NAMES_FILENAME = "CF_NAMES";
+ 
+   private static final Logger LOGGER = LoggerFactory.getLogger(RocksDBClient.class);
+@@ -107,6 +108,10 @@ public class RocksDBClient extends DB {
+     OptionsUtil.loadOptionsFromFile(optionsFile.toAbsolutePath().toString(), Env.getDefault(), options, cfDescriptors);
+     dbOptions = options;
+ 
++    if (!isConcurrentWriteSupported()) {
++      options.setAllowConcurrentMemtableWrite(false);
++    }
++
+     final MemTableConfig memTableConfig = getMemTableConfig();
+     if (memTableConfig != null) {
+       for (final ColumnFamilyDescriptor cfd : cfDescriptors) {
+@@ -156,6 +161,7 @@ public class RocksDBClient extends DB {
+ 
+     final int rocksThreads = Runtime.getRuntime().availableProcessors() * 2;
+     final MemTableConfig memTableConfig = getMemTableConfig();
++    final boolean allowConcurrentWrite = isConcurrentWriteSupported();
+ 
+     if(cfDescriptors.isEmpty()) {
+       final Options options = new Options()
+@@ -165,6 +171,9 @@ public class RocksDBClient extends DB {
+           .setIncreaseParallelism(rocksThreads)
+           .setMaxBackgroundCompactions(rocksThreads)
+           .setInfoLogLevel(InfoLogLevel.INFO_LEVEL);
++      if (!allowConcurrentWrite) {
++        options.setAllowConcurrentMemtableWrite(false);
++      }
+       if (memTableConfig != null) {
+         options.setMemTableConfig(memTableConfig);
+       }
+@@ -177,6 +186,9 @@ public class RocksDBClient extends DB {
+           .setIncreaseParallelism(rocksThreads)
+           .setMaxBackgroundCompactions(rocksThreads)
+           .setInfoLogLevel(InfoLogLevel.INFO_LEVEL);
++      if (!allowConcurrentWrite) {
++        options.setAllowConcurrentMemtableWrite(false);
++      }
+       dbOptions = options;
+ 
+       if (memTableConfig != null) {
+@@ -222,6 +234,22 @@ public class RocksDBClient extends DB {
+     }
+   }
+ 
++  /**
++   * Returns true if the configured memtable supports concurrent writes.
++   * HashSkipList, HashLinkList, and VectorRep do NOT support concurrent writes.
++   */
++  private boolean isConcurrentWriteSupported() {
++    String memtableType = getProperties().getProperty(PROPERTY_ROCKSDB_MEMTABLE, "skip_list");
++    switch (memtableType.toLowerCase()) {
++      case "prefix_hash":
++      case "hash_linkedlist":
++      case "vector":
++        return false;
++      default:
++        return true;
 +    }
 +  }
 +
