@@ -1,5 +1,5 @@
 diff --git a/memtable/hash_spdb_rep.cc b/memtable/hash_spdb_rep.cc
-index d8d944976..c35559c2d 100644
+index d8d944976..6d280d640 100644
 --- a/memtable/hash_spdb_rep.cc
 +++ b/memtable/hash_spdb_rep.cc
 @@ -19,7 +19,7 @@
@@ -21,7 +21,15 @@ index d8d944976..c35559c2d 100644
  
  namespace ROCKSDB_NAMESPACE {
  namespace {
-@@ -191,226 +191,58 @@ struct SpdbHashTable {
+@@ -41,6 +41,7 @@ struct SpdbKeyHandle {
+     next_.store(handle, std::memory_order_release);
+   }
+   std::atomic<SpdbKeyHandle*> next_{nullptr};
++  size_t key_len{0};
+   char key_[1];
+ };
+ 
+@@ -191,226 +192,58 @@ struct SpdbHashTable {
    }
  };
  
@@ -131,9 +139,10 @@ index d8d944976..c35559c2d 100644
 -
 -    if (InternalInsert(key)) {
 -      return;
--    }
--  }
--
++      iter_.Seek(EncodeKey(&tmp_, internal_key));
+     }
+   }
+ 
 -  // add wasnt completed. need to add new add vector
 -  bool notify_sort_thread = false;
 -  {
@@ -141,8 +150,7 @@ index d8d944976..c35559c2d 100644
 -
 -    if (InternalInsert(key)) {
 -      return;
-+      iter_.Seek(EncodeKey(&tmp_, internal_key));
-     }
+-    }
 -
 -    {
 -      MutexLock l(&spdb_vectors_mutex_);
@@ -161,9 +169,9 @@ index d8d944976..c35559c2d 100644
 -  }
 -  if (notify_sort_thread) {
 -    sort_thread_cv_.notify_one();
-   }
+-  }
 -}
- 
+-
 -// copy the list of vectors to the iter_anchors
 -bool SpdbVectorContainer::InitIterator(IterAnchors& iter_anchor,
 -                                       bool part_of_flush) {
@@ -197,11 +205,12 @@ index d8d944976..c35559c2d 100644
 -  if (!immutable) {
 -    if (notify_sort_thread) {
 -      sort_thread_cv_.notify_one();
--    }
--  }
++      iter_.SeekForPrev(EncodeKey(&tmp_, internal_key));
+     }
+   }
 -  return true;
 -}
--
+ 
 -void SpdbVectorContainer::InitIterator(
 -    IterAnchors& iter_anchor, std::list<SpdbVectorPtr>::iterator start,
 -    std::list<SpdbVectorPtr>::iterator last) {
@@ -210,7 +219,8 @@ index d8d944976..c35559c2d 100644
 -    iter_anchor.push_back(item);
 -  }
 -}
--
++  void SeekToFirst() override { iter_.SeekToFirst(); }
+ 
 -void SpdbVectorContainer::SeekIter(const IterAnchors& iter_anchor,
 -                                   IterHeapInfo* iter_heap_info,
 -                                   const Slice* seek_key,
@@ -223,11 +233,11 @@ index d8d944976..c35559c2d 100644
 -      if (iter->Valid()) {
 -        iter_heap_info->Insert(iter);
 -      }
-+      iter_.SeekForPrev(EncodeKey(&tmp_, internal_key));
-     }
-   }
+-    }
+-  }
 -}
--
++  void SeekToLast() override { iter_.SeekToLast(); }
+ 
 -void SpdbVectorContainer::SortThread() {
 -  std::unique_lock<std::mutex> lck(sort_thread_mutex_);
 -  std::list<SpdbVectorPtr>::iterator sort_iter_anchor = spdb_vectors_.begin();
@@ -238,16 +248,14 @@ index d8d944976..c35559c2d 100644
 -    if (immutable_) {
 -      break;
 -    }
- 
+-
 -    std::list<SpdbVectorPtr>::iterator last;
 -    last = std::prev(spdb_vectors_.end());
-+  void SeekToFirst() override { iter_.SeekToFirst(); }
- 
+-
 -    if (last == sort_iter_anchor) {
 -      continue;
 -    }
-+  void SeekToLast() override { iter_.SeekToLast(); }
- 
+-
 -    for (; sort_iter_anchor != last; ++sort_iter_anchor) {
 -      (*sort_iter_anchor)->Sort(comparator_);
 -    }
@@ -275,7 +283,7 @@ index d8d944976..c35559c2d 100644
    void Insert(KeyHandle handle) override { InsertKey(handle); }
  
    bool InsertKey(KeyHandle handle) override;
-@@ -420,14 +252,14 @@ class HashSpdbRep : public MemTableRep {
+@@ -420,14 +253,14 @@ class HashSpdbRep : public MemTableRep {
    }
  
    bool InsertKeyWithHintConcurrently(KeyHandle handle, void**) override {
@@ -284,8 +292,7 @@ index d8d944976..c35559c2d 100644
    }
  
    bool InsertKeyConcurrently(KeyHandle handle) override {
--    return InsertKey(handle);
-+    return skip_list_.InsertConcurrently(static_cast<char*>(handle));
+     return InsertKey(handle);
    }
  
 -  void MarkReadOnly() override;
@@ -293,7 +300,7 @@ index d8d944976..c35559c2d 100644
  
    bool Contains(const char* key) const override;
  
-@@ -442,73 +274,39 @@ class HashSpdbRep : public MemTableRep {
+@@ -442,73 +275,51 @@ class HashSpdbRep : public MemTableRep {
                                       bool part_of_flush = false) override;
  
    const MemTableRep::KeyComparator& GetComparator() const {
@@ -316,7 +323,12 @@ index d8d944976..c35559c2d 100644
 -  spdb_vectors_cont_ =
 -      std::make_shared<SpdbVectorContainer>(compare, use_merge);
 -}
--
++                         bool /*use_merge*/)
++    : MemTableRep(allocator),
++      spdb_hash_table_(bucket_size),
++      skip_list_(compare, allocator),
++      cmp_(compare) {}
+ 
 -HashSpdbRep::HashSpdbRep(Allocator* allocator, size_t bucket_size)
 -    : MemTableRep(allocator), spdb_hash_table_(bucket_size) {}
 -
@@ -326,12 +338,7 @@ index d8d944976..c35559c2d 100644
 -  spdb_vectors_cont_ =
 -      std::make_shared<SpdbVectorContainer>(compare, use_merge);
 -}
-+                         bool /*use_merge*/)
-+    : MemTableRep(allocator),
-+      spdb_hash_table_(bucket_size),
-+      skip_list_(compare, allocator),
-+      cmp_(compare) {}
- 
+-
 -HashSpdbRep::~HashSpdbRep() {
 -  if (spdb_vectors_cont_) {
 -    MarkReadOnly();
@@ -343,28 +350,33 @@ index d8d944976..c35559c2d 100644
 -  // constexpr size_t kInlineDataSize =
 -  //     sizeof(SpdbKeyHandle) - offsetof(SpdbKeyHandle, key_);
 -
--  size_t alloc_size = sizeof(SpdbKeyHandle) + len;
+   size_t alloc_size = sizeof(SpdbKeyHandle) + len;
 -  // alloc_size =
 -  //     std::max(len, kInlineDataSize) - kInlineDataSize +
 -  //     sizeof(SpdbKeyHandle);
--  SpdbKeyHandle* h =
+   SpdbKeyHandle* h =
 -      reinterpret_cast<SpdbKeyHandle*>(allocator_->AllocateAligned(
 -          alloc_size));
--  *buf = h->key_;
--  return h;
-+  *buf = skip_list_.AllocateKey(len);
-+  return static_cast<KeyHandle>(*buf);
++      reinterpret_cast<SpdbKeyHandle*>(allocator_->AllocateAligned(alloc_size));
++  h->key_len = len;
+   *buf = h->key_;
+   return h;
  }
  
  bool HashSpdbRep::InsertKey(KeyHandle handle) {
--  SpdbKeyHandle* spdb_handle = static_cast<SpdbKeyHandle*>(handle);
+   SpdbKeyHandle* spdb_handle = static_cast<SpdbKeyHandle*>(handle);
 -  if (!spdb_hash_table_.Add(spdb_handle, GetComparator())) {
--    return false;
--  }
++  if (!spdb_hash_table_.Add(spdb_handle, cmp_)) {
+     return false;
+   }
 -  // insert to later sorter list
 -  spdb_vectors_cont_->Insert(spdb_handle->key_);
 -  return true;
-+  return skip_list_.InsertConcurrently(static_cast<char*>(handle));
++  const char* src_key = spdb_handle->key_;
++  size_t total_len = spdb_handle->key_len;
++  char* sl_key = skip_list_.AllocateKey(total_len);
++  memcpy(sl_key, src_key, total_len);
++  return skip_list_.InsertConcurrently(sl_key);
  }
  
  bool HashSpdbRep::Contains(const char* key) const {
@@ -373,7 +385,7 @@ index d8d944976..c35559c2d 100644
 -  }
 -  return spdb_hash_table_.Contains(key, GetComparator(),
 -                                   !spdb_vectors_cont_->IsReadOnly());
-+  return skip_list_.Contains(key);
++  return spdb_hash_table_.Contains(key, cmp_, true);
  }
  
 -void HashSpdbRep::MarkReadOnly() { spdb_vectors_cont_->MarkReadOnly(); }
@@ -381,19 +393,16 @@ index d8d944976..c35559c2d 100644
  size_t HashSpdbRep::ApproximateMemoryUsage() {
    // Memory is always allocated from the allocator.
    return 0;
-@@ -516,24 +314,22 @@ size_t HashSpdbRep::ApproximateMemoryUsage() {
+@@ -516,24 +327,18 @@ size_t HashSpdbRep::ApproximateMemoryUsage() {
  
  void HashSpdbRep::Get(const LookupKey& k, void* callback_args,
                        bool (*callback_func)(void* arg, const char* entry)) {
 -  if (spdb_vectors_cont_->IsEmpty()) {
 -    return;
-+  SpdbSkipListIterator iter(&skip_list_);
-+  Slice dummy_slice;
-+  for (iter.Seek(dummy_slice, k.memtable_key().data());
-+       iter.Valid() && callback_func(callback_args, iter.key()); iter.Next()) {
-   }
+-  }
 -  spdb_hash_table_.Get(k, GetComparator(), callback_args, callback_func,
 -                       !spdb_vectors_cont_->IsReadOnly());
++  spdb_hash_table_.Get(k, cmp_, callback_args, callback_func, true);
  }
  
  MemTableRep::Iterator* HashSpdbRep::GetIterator(Arena* arena,
@@ -415,10 +424,11 @@ index d8d944976..c35559c2d 100644
  struct HashSpdbRepOptions {
    static const char* kName() { return "HashSpdbRepOptions"; }
    size_t hash_bucket_count;
-@@ -567,13 +363,7 @@ class HashSpdbRepFactory : public MemTableRepFactory {
+@@ -566,14 +371,8 @@ class HashSpdbRepFactory : public MemTableRepFactory {
+                                  const SliceTransform* transform,
                                   Logger* logger) override;
    bool IsInsertConcurrentlySupported() const override { return true; }
-   bool CanHandleDuplicatedKey() const override { return true; }
+-  bool CanHandleDuplicatedKey() const override { return true; }
 -  bool IsRefreshIterSupported() const override { return false; }
 -  MemTableRep* PreCreateMemTableRep() override;
 -  void PostCreateMemTableRep(MemTableRep* switch_mem,
@@ -426,11 +436,12 @@ index d8d944976..c35559c2d 100644
 -                             Allocator* allocator,
 -                             const SliceTransform* transform,
 -                             Logger* logger) override;
++  bool CanHandleDuplicatedKey() const override { return false; }
 +  bool IsRefreshIterSupported() const override { return true; }
  
    static const char* kClassName() { return "HashSpdbRepFactory"; }
    const char* Name() const override { return kClassName(); }
-@@ -586,18 +376,6 @@ class HashSpdbRepFactory : public MemTableRepFactory {
+@@ -586,18 +385,6 @@ class HashSpdbRepFactory : public MemTableRepFactory {
  
  // HashSpdbRepFactory
  
